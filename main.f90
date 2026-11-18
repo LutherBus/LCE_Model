@@ -48,6 +48,27 @@ program LCE_Kinematics
     integer :: i
 
     !=========================================================
+    ! Appendix Variables
+    !=========================================================
+    real(dp) :: J
+    real(dp) :: Fbar(3,3)
+    real(dp) :: FtildeBar(3,3)
+    real(dp) :: FMEBar(3,3)
+
+    real(dp) :: Jtilde, JME
+
+    real(dp) :: directions(3,3)
+    real(dp) :: directionsME(3,3)
+
+    real(dp) :: lambdaBar(3)
+    real(dp) :: lambdaMEBar(3)
+
+    real(dp) :: dWqc(3)
+    real(dp) :: dWreg(3)
+
+    real(dp) :: kv
+    real(dp) :: sigma(3,3)
+    !=========================================================
     ! Read temperature inputs
     !=========================================================
     print *, "=========================================="
@@ -121,6 +142,47 @@ program LCE_Kinematics
     call calculate_energy(Ftilde, FME, r, mu, mureg, &
                           lambda, lambdaME, phase, &
                           psi_qc, psi_reg, psi_total)
+
+    !=========================================================
+! Isochoric decomposition
+!=========================================================
+
+call isochoric_decomposition(F, J, Fbar)
+
+call isochoric_decomposition(Ftilde, Jtilde, FtildeBar)
+
+call isochoric_decomposition(FME, JME, FMEBar)
+
+!=========================================================
+! Isochoric principal stretches and directions
+!=========================================================
+
+call principal_stretches(FtildeBar, lambdaBar, directions)
+
+call principal_stretches(FMEBar, lambdaMEBar, directionsME)
+
+!=========================================================
+! First derivatives of free energy
+!=========================================================
+
+call calculate_energy_derivatives( &
+    lambdaBar, lambdaMEBar, r, mu, mureg, &
+    phase, dWqc, dWreg)
+
+!=========================================================
+! Bulk modulus
+!=========================================================
+
+kv = 500.0_dp*mu
+
+!=========================================================
+! Cauchy stress
+!=========================================================
+
+call calculate_cauchy_stress( &
+    J, lambdaBar, lambdaMEBar, &
+    directions, directionsME, &
+    dWqc, dWreg, kv, sigma)
 
     !=========================================================
     ! Display input information
@@ -228,6 +290,34 @@ program LCE_Kinematics
             print *, "Phase M: Mixed liquid/solid behavior"
 
     end select
+
+
+    print *
+    print *, "=========================================="
+    print *, "CAUCHY STRESS TENSOR"
+    print *, "=========================================="
+
+    call print_matrix(sigma)
+
+    print *
+    print *, "Principal directions of Ftilde:"
+
+    call print_matrix(directions)
+
+    print *
+    print *, "Principal directions of FME:"
+
+    call print_matrix(directionsME)
+
+    print *
+    print *, "Isochoric principal stretches:"
+    print '(3F14.6)', lambdaBar
+
+    print *
+    print *, "Isochoric principal stretches of FME:"
+    print '(3F14.6)', lambdaMEBar
+
+
 
     print *
     print *, "Quasi-convexified energy:"

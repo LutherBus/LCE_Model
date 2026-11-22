@@ -17,6 +17,16 @@ module LCE_Model
     public :: isochoric_decomposition
     public :: calculate_energy_derivatives
     public :: calculate_cauchy_stress
+    public :: calculate_second_derivatives
+    public :: calculate_gamma
+    public :: fourth_order_dyad
+    public :: fourth_order_symdyad
+    public :: calculate_principal_elasticity
+    public :: calculate_mixed_elasticity
+    public :: calculate_volumetric_elasticity
+    public :: check_elasticity_tensor
+    public :: calculate_jaumann_tangent
+    public :: tensor_to_voigt
 
 contains
 
@@ -557,5 +567,534 @@ subroutine calculate_cauchy_stress(J, lambda, lambdaME, &
     end do
 
 end subroutine calculate_cauchy_stress
+
+
+subroutine calculate_second_derivatives(lambda, r, mu, mureg, &
+                                        phase, Hqc, Hreg)
+
+    real(dp), intent(in) :: lambda(3)
+    real(dp), intent(in) :: r, mu, mureg
+
+    character(len=1), intent(in) :: phase
+
+    real(dp), intent(out) :: Hqc(3,3), Hreg(3,3)
+
+    integer :: i
+
+    ! Initialize Hessian matrices
+    Hqc = 0.0_dp
+    Hreg = 0.0_dp
+
+    !-----------------------------------------
+    ! Quasi-convexified energy Hessian
+    !-----------------------------------------
+
+    select case (phase)
+
+    case ('L')
+
+        ! Phase L: Wqc = 0
+        Hqc = 0.0_dp
+
+    case ('S')
+
+        ! Phase S
+        Hqc(1,1) = mu*r**(1.0_dp/3.0_dp)
+        Hqc(2,2) = mu*r**(1.0_dp/3.0_dp)
+        Hqc(3,3) = mu*r**(-2.0_dp/3.0_dp)
+
+    case ('M')
+
+        ! Phase M
+        Hqc(1,1) = mu*( &
+            r**(1.0_dp/3.0_dp) + &
+            2.0_dp*r**(-1.0_dp/6.0_dp)/lambda(1)**3 )
+
+    case default
+
+        error stop "ERROR: Unknown LCE phase."
+
+    end select
+
+    !-----------------------------------------
+    ! Regulation energy Hessian
+    !-----------------------------------------
+
+    do i = 1,3
+        Hreg(i,i) = mureg
+    end do
+
+end subroutine calculate_second_derivatives
+
+
+subroutine calculate_gamma(lambda, dW, H, gamma)
+
+    real(dp), intent(in) :: lambda(3)
+    real(dp), intent(in) :: dW(3)
+    real(dp), intent(in) :: H(3,3)
+
+    real(dp), intent(out) :: gamma(3,3)
+
+    real(dp) :: IM(3,3)
+    real(dp) :: rowSum(3)
+    real(dp) :: colSum(3)
+    real(dp) :: totalSum
+
+    integer :: a, b
+
+    !=========================================================
+    ! Construct intermediate matrix IM
+    !
+    ! IM_ab = lambda_a*lambda_b*H_ab
+    !        + delta_ab*lambda_a*dW_a
+    !=========================================================
+
+    IM = 0.0_dp
+
+    do a = 1,3
+        do b = 1,3
+
+            IM(a,b) = lambda(a)*lambda(b)*H(a,b)
+
+            if (a == b) then
+                IM(a,b) = IM(a,b) + lambda(a)*dW(a)
+            end if
+
+        end do
+    end do
+
+    !=========================================================
+    ! Calculate row sums, column sums, and total sum
+    !=========================================================
+
+    do a = 1,3
+        rowSum(a) = sum(IM(a,:))
+        colSum(a) = sum(IM(:,a))
+    end do
+
+    totalSum = sum(IM)
+
+    !=========================================================
+    ! Calculate gamma coefficients (Equation A.7)
+    !=========================================================
+
+    do a = 1,3
+        do b = 1,3
+
+            gamma(a,b) = IM(a,b) &
+                       - rowSum(a)/3.0_dp &
+                       - colSum(b)/3.0_dp &
+                       + totalSum/9.0_dp
+
+        end do
+    end do
+
+end subroutine calculate_gamma
+
+
+subroutine fourth_order_dyad(A, B, C)
+
+    real(dp), intent(in) :: A(3,3), B(3,3)
+    real(dp), intent(out) :: C(3,3,3,3)
+
+    integer :: i, j, k, l
+
+    do i = 1,3
+        do j = 1,3
+            do k = 1,3
+                do l = 1,3
+
+                    C(i,j,k,l) = A(i,j)*B(k,l)
+
+                end do
+            end do
+        end do
+    end do
+
+end subroutine fourth_order_dyad
+
+
+subroutine fourth_order_symdyad(A, B, C)
+
+    real(dp), intent(in) :: A(3,3), B(3,3)
+    real(dp), intent(out) :: C(3,3,3,3)
+
+    integer :: i, j, k, l
+
+    do i = 1,3
+        do j = 1,3
+            do k = 1,3
+                do l = 1,3
+
+                    C(i,j,k,l) = 0.5_dp * ( &
+                        A(i,k)*B(j,l) + &
+                        A(i,l)*B(j,k) )
+
+                end do
+            end do
+        end do
+    end do
+
+end subroutine fourth_order_symdyad
+
+
+
+subroutine calculate_principal_elasticity(lambda, dW, gamma, &
+                                         directions, Cprincipal)
+
+    real(dp), intent(in) :: lambda(3), dW(3)
+    real(dp), intent(in) :: gamma(3,3)
+    real(dp), intent(in) :: directions(3,3)
+
+    real(dp), intent(out) :: Cprincipal(3,3,3,3)
+
+    real(dp) :: beta(3)
+    real(dp) :: coefficient
+    real(dp) :: projectorA(3,3), projectorB(3,3)
+    real(dp) :: dyad(3,3,3,3)
+
+    integer :: a, b, i, k
+
+    ! Calculate beta coefficients (Equation A.5)
+    do a = 1,3
+        beta(a) = lambda(a)*dW(a) &
+                - sum(lambda*dW)/3.0_dp
+    end do
+
+    Cprincipal = 0.0_dp
+
+    ! Assemble principal-direction contribution
+    do a = 1,3
+        do b = 1,3
+
+            coefficient = gamma(a,b)
+
+            if (a == b) then
+                coefficient = coefficient - 2.0_dp*beta(a)
+            end if
+
+            ! Construct principal projectors
+            do i = 1,3
+                do k = 1,3
+                    projectorA(i,k) = directions(i,a)*directions(k,a)
+                    projectorB(i,k) = directions(i,b)*directions(k,b)
+                end do
+            end do
+
+            ! Fourth-order dyadic product
+            call fourth_order_dyad(projectorA, projectorB, dyad)
+
+            Cprincipal = Cprincipal + coefficient*dyad
+
+        end do
+    end do
+
+end subroutine calculate_principal_elasticity
+
+
+subroutine calculate_mixed_elasticity(lambda, dW, gamma, &
+                                     directions, Cmixed)
+
+    real(dp), intent(in) :: lambda(3), dW(3)
+    real(dp), intent(in) :: gamma(3,3)
+    real(dp), intent(in) :: directions(3,3)
+
+    real(dp), intent(out) :: Cmixed(3,3,3,3)
+
+    real(dp) :: beta(3)
+    real(dp) :: lambda2(3)
+    real(dp) :: q, denominator
+    real(dp) :: scale, tolerance
+    real(dp) :: meanStress
+
+    integer :: a, b, i, j, k, l
+
+    !=========================================================
+    ! Calculate beta coefficients (Equation A.5)
+    !=========================================================
+
+    meanStress = sum(lambda*dW)/3.0_dp
+
+    do a = 1,3
+        beta(a) = lambda(a)*dW(a) - meanStress
+    end do
+
+    ! Squared principal stretches
+    lambda2 = lambda**2
+
+    ! Relative tolerance for repeated stretches
+    tolerance = 1.0e-8_dp
+
+    Cmixed = 0.0_dp
+
+    !=========================================================
+    ! Mixed principal-direction contribution (Equation A.6)
+    !=========================================================
+
+    do a = 1,3
+        do b = 1,3
+
+            if (a == b) cycle
+
+            denominator = lambda2(b) - lambda2(a)
+
+            scale = max(lambda2(a), lambda2(b))
+
+            !-----------------------------------------
+            ! Distinct principal stretches
+            !-----------------------------------------
+
+            if (abs(denominator) > tolerance*scale) then
+
+                q = (beta(b)*lambda2(a) - &
+                     beta(a)*lambda2(b))/denominator
+
+            !-----------------------------------------
+            ! Equal or nearly equal stretches
+            !-----------------------------------------
+
+            else
+
+                q = 0.25_dp*( &
+                    gamma(a,a) + gamma(b,b) - &
+                    gamma(a,b) - gamma(b,a)) &
+                    - 0.5_dp*(beta(a) + beta(b))
+
+            end if
+
+            !-----------------------------------------
+            ! Assemble fourth-order tensor
+            !-----------------------------------------
+
+            do i = 1,3
+                do j = 1,3
+                    do k = 1,3
+                        do l = 1,3
+
+                            Cmixed(i,j,k,l) = &
+                                Cmixed(i,j,k,l) + q*( &
+                                directions(i,a)*directions(j,b)* &
+                                directions(k,a)*directions(l,b) + &
+                                directions(i,a)*directions(j,b)* &
+                                directions(k,b)*directions(l,a))
+
+                        end do
+                    end do
+                end do
+            end do
+
+        end do
+    end do
+
+end subroutine calculate_mixed_elasticity
+
+
+subroutine calculate_volumetric_elasticity(J, kv, Cvol)
+
+    real(dp), intent(in) :: J, kv
+    real(dp), intent(out) :: Cvol(3,3,3,3)
+
+    real(dp) :: identity(3,3)
+    real(dp) :: Idyad(3,3,3,3)
+    real(dp) :: Isym(3,3,3,3)
+
+    real(dp) :: dUdJ, d2UdJ2
+    real(dp) :: coeff1, coeff2
+
+    integer :: i
+
+    !=========================================================
+    ! Check input
+    !=========================================================
+
+    if (J <= 0.0_dp) then
+        error stop "ERROR: J must be positive."
+    end if
+
+    if (kv <= 0.0_dp) then
+        error stop "ERROR: Bulk modulus must be positive."
+    end if
+
+    !=========================================================
+    ! Construct identity tensor
+    !=========================================================
+
+    identity = 0.0_dp
+
+    do i = 1,3
+        identity(i,i) = 1.0_dp
+    end do
+
+    !=========================================================
+    ! Calculate volumetric energy derivatives
+    !=========================================================
+
+    dUdJ = 2.0_dp*kv*(J-1.0_dp)
+
+    d2UdJ2 = 2.0_dp*kv
+
+    !=========================================================
+    ! Fourth-order tensor products
+    !=========================================================
+
+    call fourth_order_dyad(identity, identity, Idyad)
+
+    call fourth_order_symdyad(identity, identity, Isym)
+
+    !=========================================================
+    ! Volumetric elasticity (Equation A.6)
+    !=========================================================
+
+    coeff1 = J*dUdJ + J**2*d2UdJ2
+
+    coeff2 = -2.0_dp*J*dUdJ
+
+    Cvol = coeff1*Idyad + coeff2*Isym
+
+end subroutine calculate_volumetric_elasticity
+
+
+subroutine check_elasticity_tensor(C, label)
+
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+
+    implicit none
+
+    real(dp), intent(in) :: C(3,3,3,3)
+    character(len=*), intent(in) :: label
+
+    real(dp) :: err_minor1, err_minor2, err_major
+    integer :: i, j, k, l
+
+    ! Initialize errors
+    err_minor1 = 0.0_dp
+    err_minor2 = 0.0_dp
+    err_major  = 0.0_dp
+
+    !=========================================================
+    ! Check for NaN or infinity
+    !=========================================================
+
+    if (.not. all(ieee_is_finite(C))) then
+        print *, trim(label), ": NON-FINITE VALUES FOUND"
+        return
+    end if
+
+    !=========================================================
+    ! Check fourth-order tensor symmetries
+    !=========================================================
+
+    do i = 1,3
+        do j = 1,3
+            do k = 1,3
+                do l = 1,3
+
+                    ! First minor symmetry: Cijkl = Cjikl
+                    err_minor1 = max(err_minor1, &
+                        abs(C(i,j,k,l)-C(j,i,k,l)))
+
+                    ! Second minor symmetry: Cijkl = Cijlk
+                    err_minor2 = max(err_minor2, &
+                        abs(C(i,j,k,l)-C(i,j,l,k)))
+
+                    ! Major symmetry: Cijkl = Cklij
+                    err_major = max(err_major, &
+                        abs(C(i,j,k,l)-C(k,l,i,j)))
+
+                end do
+            end do
+        end do
+    end do
+
+    !=========================================================
+    ! Print verification results
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, trim(label), " - TENSOR VERIFICATION"
+    print *, "=========================================="
+
+    print *, "First minor symmetry error:", err_minor1
+    print *, "Second minor symmetry error:", err_minor2
+    print *, "Major symmetry error:", err_major
+
+    if (max(err_minor1,err_minor2,err_major) < 1.0e-10_dp) then
+        print *, "Symmetry checks: PASSED"
+    else
+        print *, "Symmetry checks: FAILED"
+    end if
+
+end subroutine check_elasticity_tensor
+
+
+subroutine calculate_jaumann_tangent(Ctotal, sigma, J, Cjaumann)
+
+    real(dp), intent(in) :: Ctotal(3,3,3,3)
+    real(dp), intent(in) :: sigma(3,3), J
+
+    real(dp), intent(out) :: Cjaumann(3,3,3,3)
+
+    real(dp) :: identity(3,3)
+    real(dp) :: sigmaDyadI(3,3,3,3)
+    real(dp) :: IdyadSigma(3,3,3,3)
+
+    integer :: i
+
+    if (J <= 0.0_dp) then
+        error stop "ERROR: J must be positive."
+    end if
+
+    ! Construct identity tensor
+    identity = 0.0_dp
+
+    do i = 1,3
+        identity(i,i) = 1.0_dp
+    end do
+
+    ! Symmetric fourth-order products
+    call fourth_order_symdyad(sigma, identity, sigmaDyadI)
+    call fourth_order_symdyad(identity, sigma, IdyadSigma)
+
+    ! Equation A.8
+    Cjaumann = Ctotal/J + sigmaDyadI + IdyadSigma
+
+end subroutine calculate_jaumann_tangent
+
+
+subroutine tensor_to_voigt(Cjaumann, DDSDDE)
+
+    real(dp), intent(in) :: Cjaumann(3,3,3,3)
+    real(dp), intent(out) :: DDSDDE(6,6)
+
+    integer :: index1(6), index2(6)
+    integer :: a, b
+    integer :: i, j, k, l
+
+    ! Abaqus 3D Voigt ordering:
+    ! 11, 22, 33, 12, 13, 23
+
+    index1 = [1, 2, 3, 1, 1, 2]
+    index2 = [1, 2, 3, 2, 3, 3]
+
+    DDSDDE = 0.0_dp
+
+    do a = 1,6
+        do b = 1,6
+
+            i = index1(a)
+            j = index2(a)
+
+            k = index1(b)
+            l = index2(b)
+
+            DDSDDE(a,b) = Cjaumann(i,j,k,l)
+
+        end do
+    end do
+
+end subroutine tensor_to_voigt
+
+
 
 end module LCE_Model

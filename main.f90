@@ -68,6 +68,43 @@ program LCE_Kinematics
 
     real(dp) :: kv
     real(dp) :: sigma(3,3)
+
+    !=========================================================
+    ! Second derivatives of free energy (Hessians)
+    !=========================================================
+    real(dp) :: Hqc(3,3)
+    real(dp) :: Hreg(3,3)
+
+    !=========================================================
+    ! Gamma coefficients for spatial elasticity tensor
+    !=========================================================
+    real(dp) :: gammaQC(3,3)
+    real(dp) :: gammaReg(3,3)
+
+    
+    !=========================================================
+    ! Spatial elasticity tensor
+    !=========================================================
+    real(dp) :: CprincipalQC(3,3,3,3)
+    real(dp) :: CprincipalReg(3,3,3,3)
+
+    real(dp) :: CmixedQC(3,3,3,3)
+    real(dp) :: CmixedReg(3,3,3,3)
+
+    real(dp) :: CisoQC(3,3,3,3)
+    real(dp) :: CisoReg(3,3,3,3)
+
+    real(dp) :: Cvol(3,3,3,3)
+    real(dp) :: Ctotal(3,3,3,3)
+
+
+    !=========================================================
+    ! Jaumann tangent and Abaqus stiffness matrix
+    !=========================================================
+
+    real(dp) :: Cjaumann(3,3,3,3)
+    real(dp) :: DDSDDE(6,6)
+
     !=========================================================
     ! Read temperature inputs
     !=========================================================
@@ -168,6 +205,23 @@ call principal_stretches(FMEBar, lambdaMEBar, directionsME)
 call calculate_energy_derivatives( &
     lambdaBar, lambdaMEBar, r, mu, mureg, &
     phase, dWqc, dWreg)
+
+
+
+!=========================================================
+! Calculate second derivatives of free energy
+!=========================================================
+call calculate_second_derivatives( &
+    lambdaBar, r, mu, mureg, phase, Hqc, Hreg)
+    
+
+!=========================================================
+! Calculate gamma coefficients (Equation A.7)
+!=========================================================
+
+call calculate_gamma(lambdaBar, dWqc, Hqc, gammaQC)
+
+call calculate_gamma(lambdaMEBar, dWreg, Hreg, gammaReg)
 
 !=========================================================
 ! Bulk modulus
@@ -318,6 +372,39 @@ call calculate_cauchy_stress( &
     print '(3F14.6)', lambdaMEBar
 
 
+    !=========================================================
+    ! Display Hessian matrices
+    !=========================================================
+    print *
+    print *, "=========================================="
+    print *, "SECOND DERIVATIVES OF FREE ENERGY"
+    print *, "=========================================="
+
+    print *
+    print *, "Quasi-convexified energy Hessian:"
+    call print_matrix(Hqc)
+
+    print *
+    print *, "Regulation energy Hessian:"
+    call print_matrix(Hreg)
+
+
+    !=========================================================
+    ! Display gamma coefficients
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "GAMMA COEFFICIENTS - EQUATION A.7"
+    print *, "=========================================="
+
+    print *
+    print *, "Quasi-convexified gamma matrix:"
+    call print_matrix(gammaQC)
+
+    print *
+    print *, "Regulation gamma matrix:"
+    call print_matrix(gammaReg)
 
     print *
     print *, "Quasi-convexified energy:"
@@ -330,6 +417,175 @@ call calculate_cauchy_stress( &
     print *
     print *, "Total thermo-mechanical energy:"
     print *, psi_total
+
+    call calculate_principal_elasticity( &
+        lambdaBar, dWqc, gammaQC, directions, CprincipalQC)
+
+    call calculate_principal_elasticity( &
+        lambdaMEBar, dWreg, gammaReg, directionsME, CprincipalReg)
+
+    !=========================================================
+    ! Calculate mixed elasticity contributions
+    !=========================================================
+
+    call calculate_mixed_elasticity( &
+        lambdaBar, dWqc, gammaQC, directions, CmixedQC)
+
+    call calculate_mixed_elasticity( &
+        lambdaMEBar, dWreg, gammaReg, directionsME, CmixedReg)
+
+    !=========================================================
+    ! Calculate volumetric elasticity
+    !=========================================================
+
+    call calculate_volumetric_elasticity(J, kv, Cvol)
+
+    !=========================================================
+    ! Assemble complete spatial elasticity tensor
+    !=========================================================
+
+    
+    !=========================================================
+    ! Assemble complete spatial elasticity tensor
+    !=========================================================
+
+    CisoQC = CprincipalQC + CmixedQC
+
+    CisoReg = CprincipalReg + CmixedReg
+
+    call calculate_volumetric_elasticity(J, kv, Cvol)
+
+    Ctotal = CisoQC + CisoReg + Cvol
+
+    !=========================================================
+    ! Verify tensor assembly
+    !=========================================================
+
+    print *
+    print *, "COMPLETE SPATIAL ELASTICITY TEST"
+
+    print *, "QC C1212:", CisoQC(1,2,1,2)
+    print *, "Reg C1212:", CisoReg(1,2,1,2)
+    print *, "Vol C1212:", Cvol(1,2,1,2)
+
+    print *, "Total C1212:", Ctotal(1,2,1,2)
+
+    
+    print *
+    print *, "PRINCIPAL ELASTICITY TENSOR TEST"
+
+    print *, "QC C1111:", CprincipalQC(1,1,1,1)
+    print *, "Reg C1111:", CprincipalReg(1,1,1,1)
+    print *, "Reg C1122:", CprincipalReg(1,1,2,2)
+    print *, "Reg C1212:", CprincipalReg(1,2,1,2)
+
+    print *
+    print *, "=========================================="
+    print *, "MIXED ELASTICITY TENSOR TEST"
+    print *, "=========================================="
+
+    print *, "QC C1212:", CmixedQC(1,2,1,2)
+    print *, "Reg C1212:", CmixedReg(1,2,1,2)
+
+    print *, "QC C1313:", CmixedQC(1,3,1,3)
+    print *, "Reg C1313:", CmixedReg(1,3,1,3)
+
+    print *, "Reg C1221:", CmixedReg(1,2,2,1)
+    print *, "Reg C1111:", CmixedReg(1,1,1,1)
+
+    print *
+    print *, "Mixed tensor symmetry checks:"
+
+    print *, "Minor symmetry error:"
+    print *, abs(CmixedReg(1,2,1,2) - CmixedReg(2,1,1,2))
+
+    print *, "Major symmetry error:"
+    print *, abs(CmixedReg(1,2,1,3) - CmixedReg(1,3,1,2))
+
+    !=========================================================
+    ! Verify combined elasticity tensors
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "COMBINED ISOCHORIC ELASTICITY"
+    print *, "=========================================="
+
+    print *, "QC total iso C1212:", CisoQC(1,2,1,2)
+    print *, "Reg total iso C1212:", CisoReg(1,2,1,2)
+
+
+    !=========================================================
+    ! Volumetric elasticity verification
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "VOLUMETRIC ELASTICITY TEST"
+    print *, "=========================================="
+
+    print *, "J:", J
+    print *, "Cvol 1111:", Cvol(1,1,1,1)
+    print *, "Cvol 1122:", Cvol(1,1,2,2)
+    print *, "Cvol 1212:", Cvol(1,2,1,2)
+    print *, "Cvol 1221:", Cvol(1,2,2,1)
+
+    print *
+    print *, "=========================================="
+    print *, "COMPLETE SPATIAL ELASTICITY TEST"
+    print *, "=========================================="
+
+    print *, "Ctotal 1111:", Ctotal(1,1,1,1)
+    print *, "Ctotal 1122:", Ctotal(1,1,2,2)
+    print *, "Ctotal 1212:", Ctotal(1,2,1,2)
+    
+    call check_elasticity_tensor(Ctotal, "Complete elasticity")
+
+    !=========================================================
+    ! Calculate Jaumann tangent - Equation A.8
+    !=========================================================
+
+    call calculate_jaumann_tangent( &
+        Ctotal, sigma, J, Cjaumann)
+
+    !=========================================================
+    ! Convert fourth-order tensor to Abaqus Voigt notation
+    !=========================================================
+
+    call tensor_to_voigt(Cjaumann, DDSDDE)
+
+
+    !=========================================================
+    ! Display Jaumann tangent
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "JAUMANN TANGENT - EQUATION A.8"
+    print *, "=========================================="
+
+    print *, "Cjaumann 1111:", Cjaumann(1,1,1,1)
+    print *, "Cjaumann 1122:", Cjaumann(1,1,2,2)
+    print *, "Cjaumann 1212:", Cjaumann(1,2,1,2)
+
+    call check_elasticity_tensor(Cjaumann, "Jaumann tangent")
+
+    !=========================================================
+    ! Display Abaqus DDSDDE
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "ABAQUS DDSDDE MATRIX"
+    print *, "=========================================="
+
+    do i = 1,6
+        print '(6ES20.10)', DDSDDE(i,:)
+    end do
+
+    print *
+    print *, "DDSDDE symmetry error:"
+    print *, maxval(abs(DDSDDE-transpose(DDSDDE)))
 
     print *
     print *, "=========================================="

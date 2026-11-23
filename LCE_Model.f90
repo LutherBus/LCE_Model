@@ -27,6 +27,8 @@ module LCE_Model
     public :: check_elasticity_tensor
     public :: calculate_jaumann_tangent
     public :: tensor_to_voigt
+    public :: evaluate_lce_stress
+    public :: verify_jaumann_fd
 
 contains
 
@@ -1095,6 +1097,154 @@ subroutine tensor_to_voigt(Cjaumann, DDSDDE)
 
 end subroutine tensor_to_voigt
 
+
+subroutine evaluate_lce_stress(F, T, T0, Tni, r0, n0, &
+                               mu, mureg, sigma, phase)
+
+    real(dp), intent(in) :: F(3,3), T, T0, Tni
+    real(dp), intent(in) :: r0, n0(3), mu, mureg
+
+    real(dp), intent(out) :: sigma(3,3)
+    character(len=1), intent(out) :: phase
+
+    real(dp) :: r, kv, J, Jtilde, JME
+    real(dp) :: Fstar(3,3), FT(3,3), invFT(3,3)
+    real(dp) :: Ftilde(3,3), FME(3,3)
+    real(dp) :: Fbar(3,3), FtildeBar(3,3)
+    real(dp) :: FMEBar(3,3)
+
+    real(dp) :: lambda(3), lambdaME(3)
+    real(dp) :: directions(3,3), directionsME(3,3)
+    real(dp) :: dWqc(3), dWreg(3)
+
+    ! Temperature-dependent anisotropy
+    call calculate_r(T, T0, Tni, r0, r)
+
+    ! Reference transformations
+    call calculate_kinematics(F, n0, r0, r, &
+        Fstar, FT, invFT, Ftilde, FME)
+
+    ! Isochoric decomposition
+    call isochoric_decomposition(F, J, Fbar)
+    call isochoric_decomposition(Ftilde, Jtilde, FtildeBar)
+    call isochoric_decomposition(FME, JME, FMEBar)
+
+    ! Principal stretches and directions
+    call principal_stretches(FtildeBar, lambda, directions)
+    call principal_stretches(FMEBar, lambdaME, directionsME)
+
+    ! Determine LCE phase
+    if (lambda(1) >= r**(-1.0_dp/6.0_dp)) then
+        phase = 'L'
+    else if (lambda(3)/lambda(2) > sqrt(r)) then
+        phase = 'S'
+    else
+        phase = 'M'
+    end if
+
+    ! First derivatives of free energy
+    call calculate_energy_derivatives( &
+        lambda, lambdaME, r, mu, mureg, &
+        phase, dWqc, dWreg)
+
+    ! Bulk modulus
+    kv = 500.0_dp*mu
+
+    ! Cauchy stress
+    call calculate_cauchy_stress( &
+        J, lambda, lambdaME, &
+        directions, directionsME, &
+        dWqc, dWreg, kv, sigma)
+
+end subroutine evaluate_lce_stress
+
+
+
+subroutine verify_jaumann_fd(F, T, T0, Tni, r0, n0, &
+                             mu, mureg, Cjaumann, h, D)
+
+    real(dp), intent(in) :: F(3,3), T, T0, Tni
+    real(dp), intent(in) :: r0, n0(3), mu, mureg
+    real(dp), intent(in) :: Cjaumann(3,3,3,3)
+    real(dp), intent(in) :: h, D(3,3)
+
+    real(dp) :: Iden(3,3)
+    real(dp) :: Fplus(3,3), Fminus(3,3)
+    real(dp) :: sigmaPlus(3,3), sigmaMinus(3,3)
+    real(dp) :: numerical(3,3), analytical(3,3)
+    real(dp) :: absError, relError, scale
+
+    character(len=1) :: phasePlus, phaseMinus
+
+    integer :: i, j, k, l
+
+    if (h <= 0.0_dp) then
+        error stop "ERROR: FD step size must be positive."
+    end if
+
+    ! Identity tensor
+    Iden = 0.0_dp
+    do i = 1,3
+        Iden(i,i) = 1.0_dp
+    end do
+
+    ! Perturb deformation gradient
+    Fplus = matmul(Iden + h*D, F)
+    Fminus = matmul(Iden - h*D, F)
+
+    ! Recalculate stress at both perturbed states
+    call evaluate_lce_stress(Fplus, T, T0, Tni, r0, n0, &
+        mu, mureg, sigmaPlus, phasePlus)
+
+    call evaluate_lce_stress(Fminus, T, T0, Tni, r0, n0, &
+        mu, mureg, sigmaMinus, phaseMinus)
+
+    ! Central finite-difference derivative
+    numerical = (sigmaPlus - sigmaMinus)/(2.0_dp*h)
+
+    ! Analytical Jaumann tangent contraction
+    analytical = 0.0_dp
+
+    do i = 1,3
+        do j = 1,3
+            do k = 1,3
+                do l = 1,3
+                    analytical(i,j) = analytical(i,j) + &
+                        Cjaumann(i,j,k,l)*D(k,l)
+                end do
+            end do
+        end do
+    end do
+
+    ! Error calculations
+    absError = maxval(abs(numerical - analytical))
+
+    scale = max(maxval(abs(numerical)), &
+                maxval(abs(analytical)))
+
+    relError = absError/max(scale, 1.0e-12_dp)
+
+    print *
+    print *, "=========================================="
+    print *, "FINITE-DIFFERENCE JAUMANN VERIFICATION"
+    print *, "=========================================="
+
+    print *, "Step size:", h
+    print *, "Perturbed phases:", phasePlus, phaseMinus
+
+    print *
+    print *, "Numerical stress derivative:"
+    call print_matrix(numerical)
+
+    print *
+    print *, "Analytical tangent prediction:"
+    call print_matrix(analytical)
+
+    print *
+    print *, "Maximum absolute error:", absError
+    print *, "Relative error:", relError
+
+end subroutine verify_jaumann_fd
 
 
 end module LCE_Model

@@ -106,6 +106,13 @@ program LCE_Kinematics
     real(dp) :: DDSDDE(6,6)
 
     !=========================================================
+    ! Jaumann tangent verification variables
+    !=========================================================
+
+    real(dp) :: Dtest(3,3)
+    real(dp) :: hFD
+
+    !=========================================================
     ! Read temperature inputs
     !=========================================================
     print *, "=========================================="
@@ -553,6 +560,33 @@ call calculate_cauchy_stress( &
     !=========================================================
 
     call tensor_to_voigt(Cjaumann, DDSDDE)
+
+
+    !=========================================================
+    ! Finite-difference verification of Jaumann tangent
+    !=========================================================
+
+    hFD = 1.0e-5_dp
+
+    ! Symmetric shear perturbation
+    Dtest = 0.0_dp
+    Dtest(3,3) = 1.0_dp
+
+    print *
+    print *, "BASE STATE CAUCHY STRESS:"
+    call print_matrix(sigma)
+
+    print *
+    print *, "BASE STATE J:"
+    print *, J
+
+    print *
+    print *, "BASE STATE PHASE:"
+    print *, phase
+
+    call verify_jaumann_fd( &
+        F, T, T0, Tni, r0, n0, mu, mureg, &
+        Cjaumann, hFD, Dtest)
 
 
     !=========================================================

@@ -1134,7 +1134,7 @@ subroutine evaluate_lce_stress(F, T, T0, Tni, r0, n0, &
     call principal_stretches(FMEBar, lambdaME, directionsME)
 
     ! Determine LCE phase
-    if (lambda(1) >= r**(-1.0_dp/6.0_dp)) then
+    if (lambda(1) >= r**(-1.0_dp/6.0_dp)*(1.0_dp-1.0e-7_dp)) then
         phase = 'L'
     else if (lambda(3)/lambda(2) > sqrt(r)) then
         phase = 'S'
@@ -1162,49 +1162,46 @@ end subroutine evaluate_lce_stress
 
 subroutine verify_jaumann_fd(F, T, T0, Tni, r0, n0, &
                              mu, mureg, Cjaumann, h, D)
-
-    real(dp), intent(in) :: F(3,3), T, T0, Tni
-    real(dp), intent(in) :: r0, n0(3), mu, mureg
-    real(dp), intent(in) :: Cjaumann(3,3,3,3)
-    real(dp), intent(in) :: h, D(3,3)
-
-    real(dp) :: Iden(3,3)
-    real(dp) :: Fplus(3,3), Fminus(3,3)
-    real(dp) :: sigmaPlus(3,3), sigmaMinus(3,3)
-    real(dp) :: numerical(3,3), analytical(3,3)
+    real(dp), intent(in) :: F(3,3), T, T0, Tni, r0, n0(3), mu, mureg
+    real(dp), intent(in) :: Cjaumann(3,3,3,3), h, D(3,3)
+    real(dp) :: Iden(3,3), Fplus(3,3), Fminus(3,3)
+    real(dp) :: sigmaBase(3,3), sigmaPlus(3,3), sigmaMinus(3,3)
+    real(dp) :: numericalCauchy(3,3), numericalKirchhoff(3,3)
+    real(dp) :: analytical(3,3), analyticalCauchy(3,3)
+    real(dp) :: Jbase, Jplus, Jminus, dummyFbar(3,3)
     real(dp) :: absError, relError, scale
-
-    character(len=1) :: phasePlus, phaseMinus
-
+    character(len=1) :: phaseBase, phasePlus, phaseMinus
     integer :: i, j, k, l
 
-    if (h <= 0.0_dp) then
-        error stop "ERROR: FD step size must be positive."
-    end if
+    if (h <= 0.0_dp) error stop "FD step size must be positive"
+    if (maxval(abs(D-transpose(D))) > 1.0e-12_dp) &
+        error stop "FD verification requires symmetric D"
 
-    ! Identity tensor
     Iden = 0.0_dp
     do i = 1,3
         Iden(i,i) = 1.0_dp
     end do
 
-    ! Perturb deformation gradient
-    Fplus = matmul(Iden + h*D, F)
+    Fplus  = matmul(Iden + h*D, F)
     Fminus = matmul(Iden - h*D, F)
 
-    ! Recalculate stress at both perturbed states
+    call evaluate_lce_stress(F, T, T0, Tni, r0, n0, &
+        mu, mureg, sigmaBase, phaseBase)
     call evaluate_lce_stress(Fplus, T, T0, Tni, r0, n0, &
         mu, mureg, sigmaPlus, phasePlus)
-
     call evaluate_lce_stress(Fminus, T, T0, Tni, r0, n0, &
         mu, mureg, sigmaMinus, phaseMinus)
 
-    ! Central finite-difference derivative
-    numerical = (sigmaPlus - sigmaMinus)/(2.0_dp*h)
+    call isochoric_decomposition(F, Jbase, dummyFbar)
+    call isochoric_decomposition(Fplus, Jplus, dummyFbar)
+    call isochoric_decomposition(Fminus, Jminus, dummyFbar)
 
-    ! Analytical Jaumann tangent contraction
+    numericalCauchy = (sigmaPlus-sigmaMinus)/(2.0_dp*h)
+    numericalKirchhoff = (Jplus*sigmaPlus-Jminus*sigmaMinus) &
+                         /(2.0_dp*h*Jbase)
+
+    ! Calculate BEFORE any verification output.
     analytical = 0.0_dp
-
     do i = 1,3
         do j = 1,3
             do k = 1,3
@@ -1215,35 +1212,34 @@ subroutine verify_jaumann_fd(F, T, T0, Tni, r0, n0, &
             end do
         end do
     end do
+    analyticalCauchy = analytical - sigmaBase* &
+                        (D(1,1)+D(2,2)+D(3,3))
 
-    ! Error calculations
-    absError = maxval(abs(numerical - analytical))
-
-    scale = max(maxval(abs(numerical)), &
-                maxval(abs(analytical)))
-
-    relError = absError/max(scale, 1.0e-12_dp)
-
+    absError = maxval(abs(numericalKirchhoff-analytical))
+    scale = max(maxval(abs(numericalKirchhoff)),maxval(abs(analytical)))
+    relError = absError/max(scale,1.0e-12_dp)
     print *
-    print *, "=========================================="
-    print *, "FINITE-DIFFERENCE JAUMANN VERIFICATION"
-    print *, "=========================================="
-
+    print *, "========== ABAQUS KIRCHHOFF FD CHECK =========="
     print *, "Step size:", h
-    print *, "Perturbed phases:", phasePlus, phaseMinus
-
-    print *
-    print *, "Numerical stress derivative:"
-    call print_matrix(numerical)
-
-    print *
-    print *, "Analytical tangent prediction:"
+    print *, "Phases (base,+,-):", phaseBase, phasePlus, phaseMinus
+    print *, "Numerical (delta tau / J):"
+    call print_matrix(numericalKirchhoff)
+    print *, "Analytical (Cjaumann:D):"
     call print_matrix(analytical)
-
-    print *
     print *, "Maximum absolute error:", absError
     print *, "Relative error:", relError
 
+    absError = maxval(abs(numericalCauchy-analyticalCauchy))
+    scale = max(maxval(abs(numericalCauchy)),maxval(abs(analyticalCauchy)))
+    relError = absError/max(scale,1.0e-12_dp)
+    print *
+    print *, "========== DIRECT CAUCHY FD CHECK =========="
+    print *, "Numerical delta sigma:"
+    call print_matrix(numericalCauchy)
+    print *, "Analytical (Cjaumann:D - sigma*tr(D)):"
+    call print_matrix(analyticalCauchy)
+    print *, "Maximum absolute error:", absError
+    print *, "Relative error:", relError
 end subroutine verify_jaumann_fd
 
 

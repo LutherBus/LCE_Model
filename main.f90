@@ -112,6 +112,7 @@ program LCE_Kinematics
     real(dp) :: Dtest(3,3)
     real(dp) :: hFD
 
+
     !=========================================================
     ! Read temperature inputs
     !=========================================================
@@ -445,8 +446,6 @@ call calculate_cauchy_stress( &
     ! Calculate volumetric elasticity
     !=========================================================
 
-    call calculate_volumetric_elasticity(J, kv, Cvol)
-
     !=========================================================
     ! Assemble complete spatial elasticity tensor
     !=========================================================
@@ -563,12 +562,26 @@ call calculate_cauchy_stress( &
 
 
     !=========================================================
+    ! Display Jaumann tangent
+    !=========================================================
+
+    print *
+    print *, "=========================================="
+    print *, "JAUMANN TANGENT - EQUATION A.8"
+    print *, "=========================================="
+
+    print *, "Cjaumann 1111:", Cjaumann(1,1,1,1)
+    print *, "Cjaumann 1122:", Cjaumann(1,1,2,2)
+    print *, "Cjaumann 1212:", Cjaumann(1,2,1,2)
+
+    call check_elasticity_tensor(Cjaumann, "Jaumann tangent")
+
+    !=========================================================
     ! Finite-difference verification of Jaumann tangent
     !=========================================================
 
     hFD = 1.0e-5_dp
 
-    ! Symmetric shear perturbation
     Dtest = 0.0_dp
     Dtest(3,3) = 1.0_dp
 
@@ -587,22 +600,6 @@ call calculate_cauchy_stress( &
     call verify_jaumann_fd( &
         F, T, T0, Tni, r0, n0, mu, mureg, &
         Cjaumann, hFD, Dtest)
-
-
-    !=========================================================
-    ! Display Jaumann tangent
-    !=========================================================
-
-    print *
-    print *, "=========================================="
-    print *, "JAUMANN TANGENT - EQUATION A.8"
-    print *, "=========================================="
-
-    print *, "Cjaumann 1111:", Cjaumann(1,1,1,1)
-    print *, "Cjaumann 1122:", Cjaumann(1,1,2,2)
-    print *, "Cjaumann 1212:", Cjaumann(1,2,1,2)
-
-    call check_elasticity_tensor(Cjaumann, "Jaumann tangent")
 
     !=========================================================
     ! Display Abaqus DDSDDE

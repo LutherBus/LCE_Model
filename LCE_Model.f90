@@ -29,6 +29,11 @@ module LCE_Model
     public :: tensor_to_voigt
     public :: evaluate_lce_stress
     public :: verify_jaumann_fd
+    public :: verify_full_tangent
+    public :: sweep_phase_boundaries
+    public :: evaluate_lce_response
+    public :: build_sweep_deformation
+    public :: verify_boundary_limits
 
 contains
 
@@ -1241,6 +1246,969 @@ subroutine verify_jaumann_fd(F, T, T0, Tni, r0, n0, &
     print *, "Maximum absolute error:", absError
     print *, "Relative error:", relError
 end subroutine verify_jaumann_fd
+
+
+
+subroutine verify_full_tangent(F, T, T0, Tni, r0, n0, &
+                               mu, mureg, DDSDDE, h)
+
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+
+    real(dp), intent(in) :: F(3,3), T, T0, Tni
+    real(dp), intent(in) :: r0, n0(3), mu, mureg
+    real(dp), intent(in) :: DDSDDE(6,6)
+    real(dp), intent(in) :: h
+
+    real(dp) :: Iden(3,3), D(3,3)
+    real(dp) :: Fplus(3,3), Fminus(3,3)
+    real(dp) :: FbarBase(3,3)
+    real(dp) :: FbarPlus(3,3), FbarMinus(3,3)
+
+    real(dp) :: sigmaBase(3,3)
+    real(dp) :: sigmaPlus(3,3), sigmaMinus(3,3)
+
+    real(dp) :: numerical(3,3)
+    real(dp) :: DDSDDE_FD(6,6)
+    real(dp) :: errorMatrix(6,6)
+
+    real(dp) :: Jbase, Jplus, Jminus
+    real(dp) :: absError, relError, scale
+    real(dp) :: colError, colScale
+
+    integer :: index1(6), index2(6)
+    integer :: i, a, b, p, q
+
+    character(len=1) :: phaseBase
+    character(len=1) :: phasePlus, phaseMinus
+
+    logical :: phaseChanged
+
+    if (h <= 0.0_dp) then
+        error stop "ERROR: FD step size must be positive."
+    end if
+
+    !=========================================================
+    ! Abaqus Voigt ordering
+    !=========================================================
+
+    index1 = [1, 2, 3, 1, 1, 2]
+    index2 = [1, 2, 3, 2, 3, 3]
+
+    !=========================================================
+    ! Identity matrix
+    !=========================================================
+
+    Iden = 0.0_dp
+
+    do i = 1,3
+        Iden(i,i) = 1.0_dp
+    end do
+
+    !=========================================================
+    ! Base-state determinant and stress
+    !=========================================================
+
+    call isochoric_decomposition(F, Jbase, FbarBase)
+
+    call evaluate_lce_stress(F, T, T0, Tni, r0, n0, &
+        mu, mureg, sigmaBase, phaseBase)
+
+    DDSDDE_FD = 0.0_dp
+    phaseChanged = .false.
+
+    print *
+    print *, "=========================================="
+    print *, "FULL DDSDDE FINITE-DIFFERENCE VERIFICATION"
+    print *, "=========================================="
+
+    print *, "Base phase:", phaseBase
+    print *, "Base J:", Jbase
+    print *, "Step size:", h
+
+    !=========================================================
+    ! Loop over all six independent strain perturbations
+    !=========================================================
+
+    do b = 1,6
+
+        D = 0.0_dp
+
+        p = index1(b)
+        q = index2(b)
+
+        ! Normal perturbation
+        if (p == q) then
+
+            D(p,q) = 1.0_dp
+
+        ! Engineering shear perturbation
+        else
+
+            D(p,q) = 0.5_dp
+            D(q,p) = 0.5_dp
+
+        end if
+
+        ! Perturbed deformation gradients
+        Fplus  = matmul(Iden + h*D, F)
+        Fminus = matmul(Iden - h*D, F)
+
+        ! Perturbed determinants
+        call isochoric_decomposition( &
+            Fplus, Jplus, FbarPlus)
+
+        call isochoric_decomposition( &
+            Fminus, Jminus, FbarMinus)
+
+        ! Perturbed Cauchy stresses
+        call evaluate_lce_stress( &
+            Fplus, T, T0, Tni, r0, n0, &
+            mu, mureg, sigmaPlus, phasePlus)
+
+        call evaluate_lce_stress( &
+            Fminus, T, T0, Tni, r0, n0, &
+            mu, mureg, sigmaMinus, phaseMinus)
+
+        ! Check for phase-boundary crossings
+        print *, "Column:", b, &
+                 " Phases:", phasePlus, phaseMinus
+
+        if (phasePlus /= phaseBase .or. &
+            phaseMinus /= phaseBase) then
+
+            phaseChanged = .true.
+
+            print *, "WARNING: Phase boundary crossed."
+
+        end if
+
+        !=====================================================
+        ! Numerical Abaqus tangent:
+        ! derivative of Kirchhoff stress divided by base J
+        !=====================================================
+
+        numerical = &
+            (Jplus*sigmaPlus - Jminus*sigmaMinus) / &
+            (2.0_dp*h*Jbase)
+
+        ! Store derivative in column b
+        do a = 1,6
+
+            DDSDDE_FD(a,b) = &
+                numerical(index1(a),index2(a))
+
+        end do
+
+    end do
+
+    !=========================================================
+    ! Check for invalid numerical values
+    !=========================================================
+
+    if (.not. all(ieee_is_finite(DDSDDE_FD)) .or. &
+        .not. all(ieee_is_finite(DDSDDE))) then
+
+        print *, "FAILED: Non-finite tangent components."
+        return
+
+    end if
+
+    !=========================================================
+    ! Calculate error matrix
+    !=========================================================
+
+    errorMatrix = DDSDDE_FD - DDSDDE
+
+    absError = maxval(abs(errorMatrix))
+
+    scale = max(maxval(abs(DDSDDE_FD)), &
+                maxval(abs(DDSDDE)), 1.0e-12_dp)
+
+    relError = absError/scale
+
+    !=========================================================
+    ! Print analytical matrix
+    !=========================================================
+
+    print *
+    print *, "Analytical DDSDDE:"
+
+    do i = 1,6
+        print '(6ES18.8)', DDSDDE(i,:)
+    end do
+
+    !=========================================================
+    ! Print numerical matrix
+    !=========================================================
+
+    print *
+    print *, "Numerical DDSDDE:"
+
+    do i = 1,6
+        print '(6ES18.8)', DDSDDE_FD(i,:)
+    end do
+
+    !=========================================================
+    ! Print difference matrix
+    !=========================================================
+
+    print *
+    print *, "Difference (Numerical - Analytical):"
+
+    do i = 1,6
+        print '(6ES18.8)', errorMatrix(i,:)
+    end do
+
+    !=========================================================
+    ! Print errors for each column
+    !=========================================================
+
+    print *
+    print *, "COLUMN-BY-COLUMN ERRORS"
+
+    do b = 1,6
+
+        colError = maxval(abs(errorMatrix(:,b)))
+
+        colScale = max( &
+            maxval(abs(DDSDDE_FD(:,b))), &
+            maxval(abs(DDSDDE(:,b))), 1.0e-12_dp)
+
+        print *, "Column:", b
+        print *, "Absolute error:", colError
+        print *, "Relative error:", colError/colScale
+
+    end do
+
+    !=========================================================
+    ! Overall verification results
+    !=========================================================
+
+    print *
+    print *, "Maximum absolute error:", absError
+    print *, "Overall relative error:", relError
+
+    print *, "Numerical symmetry error:", &
+        maxval(abs(DDSDDE_FD-transpose(DDSDDE_FD)))
+
+    if (phaseChanged) then
+
+        print *, "WARNING: Phase change detected."
+        print *, "Smooth tangent comparison may be invalid."
+
+    end if
+
+end subroutine verify_full_tangent
+
+
+
+subroutine sweep_phase_boundaries(T, T0, Tni, r0, n0, &
+                                  mu, mureg, sweepType)
+
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+
+    real(dp), intent(in) :: T, T0, Tni
+    real(dp), intent(in) :: r0, n0(3)
+    real(dp), intent(in) :: mu, mureg
+
+    integer, intent(in) :: sweepType
+
+    real(dp) :: r, kv, s, sStart, sEnd
+
+    real(dp) :: F(3,3), Ftarget(3,3)
+    real(dp) :: Fstar(3,3), invFstar(3,3)
+    real(dp) :: FT(3,3), invFT(3,3)
+    real(dp) :: Ftilde(3,3), FME(3,3)
+
+    real(dp) :: Fbar(3,3)
+    real(dp) :: FtildeBar(3,3), FMEBar(3,3)
+
+    real(dp) :: J, Jtilde, JME
+
+    real(dp) :: lambda(3), lambdaME(3)
+    real(dp) :: lambdaBar(3), lambdaMEBar(3)
+
+    real(dp) :: directions(3,3)
+    real(dp) :: directionsME(3,3)
+
+    real(dp) :: psi_qc, psi_reg, psi_total
+    real(dp) :: psi_vol
+
+    real(dp) :: dWqc(3), dWreg(3)
+    real(dp) :: Hqc(3,3), Hreg(3,3)
+
+    real(dp) :: gammaQC(3,3), gammaReg(3,3)
+
+    real(dp) :: CprincipalQC(3,3,3,3)
+    real(dp) :: CprincipalReg(3,3,3,3)
+
+    real(dp) :: CmixedQC(3,3,3,3)
+    real(dp) :: CmixedReg(3,3,3,3)
+
+    real(dp) :: Cvol(3,3,3,3)
+    real(dp) :: Ctotal(3,3,3,3)
+    real(dp) :: Cjaumann(3,3,3,3)
+
+    real(dp) :: sigma(3,3)
+    real(dp) :: DDSDDE(6,6)
+
+    integer :: step, nSteps, fileUnit
+
+    character(len=1) :: phase, previousPhase
+    character(len=80) :: filename
+
+    !=========================================================
+    ! Material parameters
+    !=========================================================
+
+    call calculate_r(T, T0, Tni, r0, r)
+
+    kv = 500.0_dp*mu
+
+    call build_step_tensor(1.0_dp/r0, n0, invFstar)
+
+    nSteps = 2000
+
+    !=========================================================
+    ! Select deformation path
+    !=========================================================
+
+    select case (sweepType)
+
+    case (1)
+
+        sStart = 1.0_dp
+        sEnd = 0.35_dp
+
+        filename = "phase_sweep_LMS.csv"
+
+    case (2)
+
+        sStart = 1.0_dp
+        sEnd = 2.5_dp
+
+        filename = "phase_sweep_LS.csv"
+
+    case default
+
+        error stop "ERROR: Invalid sweep type."
+
+    end select
+
+    !=========================================================
+    ! Open output file
+    !=========================================================
+
+    open(newunit=fileUnit, file=trim(filename), &
+         status="replace", action="write")
+
+    write(fileUnit,'(A)') &
+        "s,phase,J,lambda1,lambda2,lambda3," // &
+        "Wqc,Wreg,Wvol,Wtotal," // &
+        "sigma11,sigma22,sigma33,sigma12," // &
+        "C11,C22,C33,C12,C44,C55,C66"
+
+    previousPhase = ' '
+
+    !=========================================================
+    ! Deformation sweep
+    !=========================================================
+
+    do step = 0,nSteps
+
+        s = sStart + (sEnd-sStart)* &
+            real(step,dp)/real(nSteps,dp)
+
+        Ftarget = 0.0_dp
+
+        select case (sweepType)
+
+        case (1)
+
+            Ftarget(1,1) = 1.0_dp/s
+            Ftarget(2,2) = s
+            Ftarget(3,3) = 1.0_dp
+
+        case (2)
+
+            Ftarget(1,1) = 1.0_dp/sqrt(s)
+            Ftarget(2,2) = 1.0_dp/sqrt(s)
+            Ftarget(3,3) = s
+
+        end select
+
+        ! Convert transformed deformation into F
+        F = matmul(Ftarget, invFstar)
+
+        !=====================================================
+        ! Kinematics
+        !=====================================================
+
+        call calculate_kinematics(F, n0, r0, r, &
+            Fstar, FT, invFT, Ftilde, FME)
+
+        call isochoric_decomposition(F, J, Fbar)
+
+        call isochoric_decomposition( &
+            Ftilde, Jtilde, FtildeBar)
+
+        call isochoric_decomposition( &
+            FME, JME, FMEBar)
+
+        !=====================================================
+        ! Energy and phase
+        !=====================================================
+
+        call calculate_energy(Ftilde, FME, r, mu, mureg, &
+            lambda, lambdaME, phase, &
+            psi_qc, psi_reg, psi_total)
+
+        psi_vol = kv*(J-1.0_dp)**2
+
+        !=====================================================
+        ! Principal stretches and directions
+        !=====================================================
+
+        call principal_stretches( &
+            FtildeBar, lambdaBar, directions)
+
+        call principal_stretches( &
+            FMEBar, lambdaMEBar, directionsME)
+
+        !=====================================================
+        ! Energy derivatives
+        !=====================================================
+
+        call calculate_energy_derivatives( &
+            lambdaBar, lambdaMEBar, r, mu, mureg, &
+            phase, dWqc, dWreg)
+
+        call calculate_second_derivatives( &
+            lambdaBar, r, mu, mureg, phase, Hqc, Hreg)
+
+        !=====================================================
+        ! Cauchy stress
+        !=====================================================
+
+        call calculate_cauchy_stress( &
+            J, lambdaBar, lambdaMEBar, &
+            directions, directionsME, &
+            dWqc, dWreg, kv, sigma)
+
+        !=====================================================
+        ! Gamma coefficients
+        !=====================================================
+
+        call calculate_gamma( &
+            lambdaBar, dWqc, Hqc, gammaQC)
+
+        call calculate_gamma( &
+            lambdaMEBar, dWreg, Hreg, gammaReg)
+
+        !=====================================================
+        ! Principal elasticity
+        !=====================================================
+
+        call calculate_principal_elasticity( &
+            lambdaBar, dWqc, gammaQC, &
+            directions, CprincipalQC)
+
+        call calculate_principal_elasticity( &
+            lambdaMEBar, dWreg, gammaReg, &
+            directionsME, CprincipalReg)
+
+        !=====================================================
+        ! Mixed elasticity
+        !=====================================================
+
+        call calculate_mixed_elasticity( &
+            lambdaBar, dWqc, gammaQC, &
+            directions, CmixedQC)
+
+        call calculate_mixed_elasticity( &
+            lambdaMEBar, dWreg, gammaReg, &
+            directionsME, CmixedReg)
+
+        !=====================================================
+        ! Volumetric and total elasticity
+        !=====================================================
+
+        call calculate_volumetric_elasticity(J, kv, Cvol)
+
+        Ctotal = CprincipalQC + CmixedQC + &
+                 CprincipalReg + CmixedReg + Cvol
+
+        !=====================================================
+        ! Jaumann tangent and DDSDDE
+        !=====================================================
+
+        call calculate_jaumann_tangent( &
+            Ctotal, sigma, J, Cjaumann)
+
+        call tensor_to_voigt(Cjaumann, DDSDDE)
+
+        !=====================================================
+        ! Check numerical stability
+        !=====================================================
+
+        if (.not. all(ieee_is_finite(sigma)) .or. &
+            .not. all(ieee_is_finite(DDSDDE)) .or. &
+            .not. ieee_is_finite(psi_total)) then
+
+            print *, "ERROR: Non-finite values at s =", s
+
+            close(fileUnit)
+
+            error stop "Phase sweep failed."
+
+        end if
+
+        !=====================================================
+        ! Detect phase transitions
+        !=====================================================
+
+        if (phase /= previousPhase) then
+
+            print *, "s =", s, " Phase =", phase
+
+            previousPhase = phase
+
+        end if
+
+        !=====================================================
+        ! Write results to CSV
+        !=====================================================
+
+        write(fileUnit,'(ES24.16,A,A1,19(A,ES24.16))') &
+            s, ",", phase, &
+            ",", J, &
+            ",", lambdaBar(1), &
+            ",", lambdaBar(2), &
+            ",", lambdaBar(3), &
+            ",", psi_qc, &
+            ",", psi_reg, &
+            ",", psi_vol, &
+            ",", psi_total + psi_vol, &
+            ",", sigma(1,1), &
+            ",", sigma(2,2), &
+            ",", sigma(3,3), &
+            ",", sigma(1,2), &
+            ",", DDSDDE(1,1), &
+            ",", DDSDDE(2,2), &
+            ",", DDSDDE(3,3), &
+            ",", DDSDDE(1,2), &
+            ",", DDSDDE(4,4), &
+            ",", DDSDDE(5,5), &
+            ",", DDSDDE(6,6)
+
+    end do
+
+    close(fileUnit)
+
+    print *
+    print *, "Phase sweep complete."
+    print *, "Results saved to: ", trim(filename)
+
+end subroutine sweep_phase_boundaries
+
+
+subroutine evaluate_lce_response(F, T, T0, Tni, r0, n0, &
+                                 mu, mureg, phase, &
+                                 energy, sigma, DDSDDE)
+
+    real(dp), intent(in) :: F(3,3)
+    real(dp), intent(in) :: T, T0, Tni, r0
+    real(dp), intent(in) :: n0(3), mu, mureg
+
+    character(len=1), intent(out) :: phase
+
+    real(dp), intent(out) :: energy
+    real(dp), intent(out) :: sigma(3,3)
+    real(dp), intent(out) :: DDSDDE(6,6)
+
+    real(dp) :: r, kv
+    real(dp) :: J, Jtilde, JME
+
+    real(dp) :: Fstar(3,3), FT(3,3), invFT(3,3)
+    real(dp) :: Ftilde(3,3), FME(3,3)
+
+    real(dp) :: Fbar(3,3)
+    real(dp) :: FtildeBar(3,3), FMEBar(3,3)
+
+    real(dp) :: lambda(3), lambdaME(3)
+    real(dp) :: lambdaBar(3), lambdaMEBar(3)
+
+    real(dp) :: directions(3,3), directionsME(3,3)
+
+    real(dp) :: psi_qc, psi_reg, psi_total
+
+    real(dp) :: dWqc(3), dWreg(3)
+    real(dp) :: Hqc(3,3), Hreg(3,3)
+    real(dp) :: gammaQC(3,3), gammaReg(3,3)
+
+    real(dp) :: CprincipalQC(3,3,3,3)
+    real(dp) :: CprincipalReg(3,3,3,3)
+    real(dp) :: CmixedQC(3,3,3,3)
+    real(dp) :: CmixedReg(3,3,3,3)
+
+    real(dp) :: Cvol(3,3,3,3)
+    real(dp) :: Ctotal(3,3,3,3)
+    real(dp) :: Cjaumann(3,3,3,3)
+
+    ! Temperature-dependent material parameters
+    call calculate_r(T, T0, Tni, r0, r)
+
+    kv = 500.0_dp*mu
+
+    ! Kinematics
+    call calculate_kinematics(F, n0, r0, r, &
+        Fstar, FT, invFT, Ftilde, FME)
+
+    ! Isochoric decomposition
+    call isochoric_decomposition(F, J, Fbar)
+
+    call isochoric_decomposition( &
+        Ftilde, Jtilde, FtildeBar)
+
+    call isochoric_decomposition( &
+        FME, JME, FMEBar)
+
+    ! Free energy and phase selection
+    call calculate_energy(Ftilde, FME, r, mu, mureg, &
+        lambda, lambdaME, phase, &
+        psi_qc, psi_reg, psi_total)
+
+    energy = psi_total + kv*(J-1.0_dp)**2
+
+    ! Principal stretches and spatial directions
+    call principal_stretches( &
+        FtildeBar, lambdaBar, directions)
+
+    call principal_stretches( &
+        FMEBar, lambdaMEBar, directionsME)
+
+    ! First and second energy derivatives
+    call calculate_energy_derivatives( &
+        lambdaBar, lambdaMEBar, r, mu, mureg, &
+        phase, dWqc, dWreg)
+
+    call calculate_second_derivatives( &
+        lambdaBar, r, mu, mureg, phase, Hqc, Hreg)
+
+    ! Cauchy stress
+    call calculate_cauchy_stress( &
+        J, lambdaBar, lambdaMEBar, &
+        directions, directionsME, &
+        dWqc, dWreg, kv, sigma)
+
+    ! Gamma coefficients
+    call calculate_gamma( &
+        lambdaBar, dWqc, Hqc, gammaQC)
+
+    call calculate_gamma( &
+        lambdaMEBar, dWreg, Hreg, gammaReg)
+
+    ! Principal elasticity
+    call calculate_principal_elasticity( &
+        lambdaBar, dWqc, gammaQC, &
+        directions, CprincipalQC)
+
+    call calculate_principal_elasticity( &
+        lambdaMEBar, dWreg, gammaReg, &
+        directionsME, CprincipalReg)
+
+    ! Mixed elasticity
+    call calculate_mixed_elasticity( &
+        lambdaBar, dWqc, gammaQC, &
+        directions, CmixedQC)
+
+    call calculate_mixed_elasticity( &
+        lambdaMEBar, dWreg, gammaReg, &
+        directionsME, CmixedReg)
+
+    ! Volumetric elasticity
+    call calculate_volumetric_elasticity(J, kv, Cvol)
+
+    ! Complete spatial elasticity
+    Ctotal = CprincipalQC + CmixedQC + &
+             CprincipalReg + CmixedReg + Cvol
+
+    ! Abaqus tangent
+    call calculate_jaumann_tangent( &
+        Ctotal, sigma, J, Cjaumann)
+
+    call tensor_to_voigt(Cjaumann, DDSDDE)
+
+end subroutine evaluate_lce_response
+
+
+
+subroutine build_sweep_deformation(s, sweepType, &
+                                   r0, n0, F)
+
+    real(dp), intent(in) :: s, r0, n0(3)
+    integer, intent(in) :: sweepType
+
+    real(dp), intent(out) :: F(3,3)
+
+    real(dp) :: Ftarget(3,3)
+    real(dp) :: invFstar(3,3)
+
+    if (s <= 0.0_dp) then
+        error stop "ERROR: s must be positive."
+    end if
+
+    call build_step_tensor(1.0_dp/r0, n0, invFstar)
+
+    Ftarget = 0.0_dp
+
+    select case (sweepType)
+
+    case (1)
+
+        ! L-M-S deformation path
+        Ftarget(1,1) = 1.0_dp/s
+        Ftarget(2,2) = s
+        Ftarget(3,3) = 1.0_dp
+
+    case (2)
+
+        ! L-S deformation path
+        Ftarget(1,1) = 1.0_dp/sqrt(s)
+        Ftarget(2,2) = 1.0_dp/sqrt(s)
+        Ftarget(3,3) = s
+
+    case default
+
+        error stop "ERROR: Invalid sweep type."
+
+    end select
+
+    F = matmul(Ftarget, invFstar)
+
+end subroutine build_sweep_deformation
+
+
+subroutine verify_boundary_limits(T, T0, Tni, r0, n0, &
+                                   mu, mureg, boundaryType)
+
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+
+    real(dp), intent(in) :: T, T0, Tni, r0
+    real(dp), intent(in) :: n0(3), mu, mureg
+
+    integer, intent(in) :: boundaryType
+
+    real(dp) :: r, sc, offset, s, h
+
+    real(dp) :: F(3,3), F1(3,3), F2(3,3)
+
+    real(dp) :: energyMinus, energyPlus
+    real(dp) :: sigmaMinus(3,3), sigmaPlus(3,3)
+    real(dp) :: Cminus(6,6), Cplus(6,6)
+
+    real(dp) :: energyBase, energy1, energy2
+    real(dp) :: sigmaBase(3,3)
+    real(dp) :: sigma1(3,3), sigma2(3,3)
+
+    real(dp) :: Cbase(6,6), C1(6,6), C2(6,6)
+
+    real(dp) :: Dvoigt(6)
+    real(dp) :: analytical(6), numerical(6)
+    real(dp) :: derivative(3,3)
+
+    real(dp) :: absError, relError, scale
+
+    integer :: sweepType, iteration, side
+    integer :: a
+
+    integer :: index1(6), index2(6)
+
+    character(len=1) :: phaseMinus, phasePlus
+    character(len=1) :: phaseBase, phase1, phase2
+
+    character(len=20) :: boundaryName
+
+    call calculate_r(T, T0, Tni, r0, r)
+
+    index1 = [1, 2, 3, 1, 1, 2]
+    index2 = [1, 2, 3, 2, 3, 3]
+
+    ! Select theoretical phase boundary
+    select case (boundaryType)
+
+    case (1)
+
+        sc = r**(-1.0_dp/6.0_dp)
+        sweepType = 1
+        boundaryName = "L-M"
+
+    case (2)
+
+        sc = r**(-0.5_dp)
+        sweepType = 1
+        boundaryName = "M-S"
+
+    case (3)
+
+        sc = r**(1.0_dp/3.0_dp)
+        sweepType = 2
+        boundaryName = "L-S"
+
+    case default
+
+        error stop "ERROR: Invalid boundary type."
+
+    end select
+
+    print *
+    print *, "=========================================="
+    print *, "BOUNDARY LIMIT TEST: ", trim(boundaryName)
+    print *, "=========================================="
+
+    print *, "Critical s:", sc
+
+    ! Approach boundary from both sides
+    do iteration = 2,6
+
+        offset = 10.0_dp**(-iteration)
+
+        ! Negative side
+        call build_sweep_deformation( &
+            sc-offset, sweepType, r0, n0, F)
+
+        call evaluate_lce_response( &
+            F, T, T0, Tni, r0, n0, mu, mureg, &
+            phaseMinus, energyMinus, sigmaMinus, Cminus)
+
+        ! Positive side
+        call build_sweep_deformation( &
+            sc+offset, sweepType, r0, n0, F)
+
+        call evaluate_lce_response( &
+            F, T, T0, Tni, r0, n0, mu, mureg, &
+            phasePlus, energyPlus, sigmaPlus, Cplus)
+
+        ! Continuity checks
+        print *
+        print *, "Offset:", offset
+
+        print *, "Phases (-,+):", phaseMinus, phasePlus
+
+        print *, "Energy difference:", &
+            abs(energyPlus-energyMinus)
+
+        print *, "Maximum stress difference:", &
+            maxval(abs(sigmaPlus-sigmaMinus))
+
+        print *, "Maximum tangent difference:", &
+            maxval(abs(Cplus-Cminus))
+
+        if (.not. all(ieee_is_finite(Cminus)) .or. &
+            .not. all(ieee_is_finite(Cplus))) then
+
+            error stop "ERROR: Non-finite boundary tangent."
+
+        end if
+
+        !=================================================
+        ! One-sided tangent verification on both sides
+        !=================================================
+
+        do side = -1,1,2
+
+            s = sc + real(side,dp)*offset
+
+            ! Small step directed away from boundary
+            h = 0.1_dp*offset
+
+            call build_sweep_deformation( &
+                s, sweepType, r0, n0, F)
+
+            call build_sweep_deformation( &
+                s+real(side,dp)*h, &
+                sweepType, r0, n0, F1)
+
+            call build_sweep_deformation( &
+                s+2.0_dp*real(side,dp)*h, &
+                sweepType, r0, n0, F2)
+
+            call evaluate_lce_response( &
+                F, T, T0, Tni, r0, n0, mu, mureg, &
+                phaseBase, energyBase, sigmaBase, Cbase)
+
+            call evaluate_lce_response( &
+                F1, T, T0, Tni, r0, n0, mu, mureg, &
+                phase1, energy1, sigma1, C1)
+
+            call evaluate_lce_response( &
+                F2, T, T0, Tni, r0, n0, mu, mureg, &
+                phase2, energy2, sigma2, C2)
+
+            ! Ensure all states belong to same phase
+            if (phaseBase /= phase1 .or. &
+                phaseBase /= phase2) then
+
+                print *, "WARNING: Phase crossing."
+                cycle
+
+            end if
+
+            ! Second-order one-sided derivative
+            derivative = real(side,dp)* &
+                (-3.0_dp*sigmaBase + &
+                 4.0_dp*sigma1 - sigma2) / &
+                (2.0_dp*h)
+
+            ! Spatial deformation rate along sweep path
+            Dvoigt = 0.0_dp
+
+            select case (sweepType)
+
+            case (1)
+
+                Dvoigt(1) = -1.0_dp/s
+                Dvoigt(2) =  1.0_dp/s
+
+            case (2)
+
+                Dvoigt(1) = -0.5_dp/s
+                Dvoigt(2) = -0.5_dp/s
+                Dvoigt(3) =  1.0_dp/s
+
+            end select
+
+            ! Analytical stress derivative
+            analytical = matmul(Cbase, Dvoigt)
+
+            ! Numerical stress derivative in Voigt form
+            do a = 1,6
+
+                numerical(a) = &
+                    derivative(index1(a),index2(a))
+
+            end do
+
+            ! Calculate error
+            absError = maxval(abs(numerical-analytical))
+
+            scale = max(maxval(abs(numerical)), &
+                        maxval(abs(analytical)), &
+                        1.0e-12_dp)
+
+            relError = absError/scale
+
+            print *, "Side:", side, " Phase:", phaseBase
+
+            print *, "FD absolute error:", absError
+            print *, "FD relative error:", relError
+
+        end do
+
+    end do
+
+end subroutine verify_boundary_limits
+
 
 
 end module LCE_Model

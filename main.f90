@@ -560,7 +560,15 @@ call calculate_cauchy_stress( &
 
     call tensor_to_voigt(Cjaumann, DDSDDE)
 
+    !=========================================================
+    ! Verify all 36 components of DDSDDE
+    !=========================================================
 
+    hFD = 1.0e-5_dp
+
+    call verify_full_tangent( &
+        F, T, T0, Tni, r0, n0, mu, mureg, &
+        DDSDDE, hFD)
     !=========================================================
     ! Display Jaumann tangent
     !=========================================================
@@ -597,30 +605,63 @@ call calculate_cauchy_stress( &
     print *, "BASE STATE PHASE:"
     print *, phase
 
-    call verify_jaumann_fd( &
-        F, T, T0, Tni, r0, n0, mu, mureg, &
-        Cjaumann, hFD, Dtest)
+    !call verify_jaumann_fd( &
+    !    F, T, T0, Tni, r0, n0, mu, mureg, &
+    !    Cjaumann, hFD, Dtest)
 
     !=========================================================
     ! Display Abaqus DDSDDE
     !=========================================================
 
-    print *
-    print *, "=========================================="
-    print *, "ABAQUS DDSDDE MATRIX"
-    print *, "=========================================="
+    ! print *
+    ! print *, "=========================================="
+    ! print *, "ABAQUS DDSDDE MATRIX"
+    ! print *, "=========================================="
 
-    do i = 1,6
-        print '(6ES20.10)', DDSDDE(i,:)
-    end do
+    ! do i = 1,6
+    !     print '(6ES20.10)', DDSDDE(i,:)
+    ! end do
 
-    print *
-    print *, "DDSDDE symmetry error:"
-    print *, maxval(abs(DDSDDE-transpose(DDSDDE)))
+    ! print *
+    ! print *, "DDSDDE symmetry error:"
+    ! print *, maxval(abs(DDSDDE-transpose(DDSDDE)))
 
-    print *
-    print *, "=========================================="
-    print *, "CALCULATION COMPLETE"
-    print *, "=========================================="
+    ! print *
+    ! print *, "=========================================="
+    ! print *, "CALCULATION COMPLETE"
+    ! print *, "=========================================="
+
+    ! !=========================================================
+    ! ! Phase-boundary verification
+    ! !=========================================================
+
+    ! print *
+    ! print *, "=========================================="
+    ! print *, "PHASE SWEEP A: L - M - S"
+    ! print *, "=========================================="
+
+    ! call sweep_phase_boundaries( &
+    !     T, T0, Tni, r0, n0, mu, mureg, 1)
+
+    ! print *
+    ! print *, "=========================================="
+    ! print *, "PHASE SWEEP B: L - S"
+    ! print *, "=========================================="
+
+    ! call sweep_phase_boundaries( &
+    !     T, T0, Tni, r0, n0, mu, mureg, 2)
+
+    !=========================================================
+    ! Phase-boundary limit verification
+    !=========================================================
+
+    call verify_boundary_limits( &
+        T, T0, Tni, r0, n0, mu, mureg, 1)
+
+    call verify_boundary_limits( &
+        T, T0, Tni, r0, n0, mu, mureg, 2)
+
+    call verify_boundary_limits( &
+        T, T0, Tni, r0, n0, mu, mureg, 3)
 
 end program LCE_Kinematics
